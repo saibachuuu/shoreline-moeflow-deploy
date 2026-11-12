@@ -1,0 +1,45 @@
+# Frontend for the C# backend.
+#
+# Rendered by the nginx image entrypoint: every ${VAR} below is substituted
+# from the container environment (envsubst), so only list variables that the
+# frontend service actually defines.
+#
+# /v1/* is forwarded as /v1/* to the API: the C# app already serves the
+# unprefixed routes, unlike the legacy Python image which expected nginx to
+# strip /api. Here we strip it before proxying because the SPA is built with
+# the /api prefix baked in.
+
+server {
+    listen 80 default_server;
+    server_name _;
+
+    client_max_body_size ${MAX_CONTENT_LENGTH_MB}m;
+
+    location /api/ {
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass http://${CSHARP_API_HOST}:${CSHARP_API_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+
+    location = /api {
+        return 301 /api/;
+    }
+
+    location /storage/ {
+        # Only meaningful for Storage__Type=LOCAL; R2/CDN URLs bypass this.
+        alias /storage/;
+        add_header Cache-Control "public, max-age=604800";
+    }
+
+    location / {
+        root /build;
+        index index.html;
+        try_files $uri /index.html;
+    }
+}

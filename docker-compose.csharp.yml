@@ -1,0 +1,130 @@
+# C# backend stack (replacement for the Python stack in docker-compose.yml).
+#
+# It shares the SAME MongoDB instance as the Python stack: this file joins the
+# existing external network and never creates a second database. That is what
+# lets you compare both backends against one dataset.
+#
+# Roles:
+#   moeflow-csharp-api      HTTP only, runs the schema gate (Migrations__Mode).
+#   moeflow-csharp-worker   drains the Mongo-backed job queue, no ports.
+#   moeflow-csharp-frontend nginx: serves the SPA build and proxies /api/.
+#
+# Usage:
+#   cp .env-csharp.sample .env-csharp   # then fill the CHANGE_ME values
+#   docker compose -f docker-compose.csharp.yml up -d
+#   docker compose -f docker-compose.csharp.yml logs -f moeflow-csharp-api
+#
+# The Python stack keeps running on its own ports; nothing here touches it
+# except reading the same database.
+
+name: moeflow-csharp
+
+networks:
+  default:
+    external: true
+    name: ${MOEFLOW_EXTERNAL_NETWORK:-moeflow-deploy_default}
+
+x-logging: &logging_options {}
+
+# Shared by both roles. Values are identical except for the four switches
+# listed per service below.
+x-csharp-env: &csharp_env
+  Mongo__Uri: ${MONGO_URI:?set MONGO_URI (mongodb://user:pass@moeflow-mongodb:27017/moeflow?authSource=admin)}
+  Auth__Secret: ${AUTH_SECRET:?set AUTH_SECRET - must equal the legacy SECRET_KEY}
+  Auth__AdminEmail: ${AUTH_ADMIN_EMAIL:?set AUTH_ADMIN_EMAIL}
+  Bootstrap__Enabled: "false"
+
+  # Object storage. R2 needs path-style addressing and region "auto".
+  Storage__Type: ${STORAGE_TYPE:-R2}
+  Storage__Endpoint: ${STORAGE_ENDPOINT:?set STORAGE_ENDPOINT}
+  Storage__Bucket: ${STORAGE_BUCKET:?set STORAGE_BUCKET}
+  Storage__AccessKey: ${STORAGE_ACCESS_KEY:?set STORAGE_ACCESS_KEY}
+  Storage__SecretKey: ${STORAGE_SECRET_KEY:?set STORAGE_SECRET_KEY}
+  Storage__Region: ${STORAGE_REGION:-auto}
+  Storage__ForcePathStyle: ${STORAGE_FORCE_PATH_STYLE:-true}
+  Storage__Domain: ${STORAGE_DOMAIN:-}
+  Storage__ViaCdn: ${STORAGE_VIA_CDN:-false}
+  Storage__KeyPrefix: ${STORAGE_KEY_PREFIX:-}
+
+  # Mail. Port 465 implies SslOnConnect; Mail__SecureSocketOptions only affects
+  # notification mail (verification codes follow Mail__StartTls).
+  Mail__Enabled: ${MAIL_ENABLED:-true}
+  Mail__Host: ${MAIL_HOST:?set MAIL_HOST}
+  Mail__Port: ${MAIL_PORT:-587}
+  Mail__UseSsl: ${MAIL_USE_SSL:-false}
+  Mail__StartTls: ${MAIL_START_TLS:-true}
+  Mail__SecureSocketOptions: ${MAIL_SECURE_SOCKET_OPTIONS:-}
+  Mail__From: ${MAIL_FROM:?set MAIL_FROM}
+  Mail__Username: ${MAIL_USERNAME:-}
+  Mail__Password: ${MAIL_PASSWORD:-}
+
+  Site__Name: ${SITE_NAME:-Moeflow}
+  Site__Origin: ${SITE_ORIGIN:-}
+  Cors__Origins__0: ${CORS_ORIGIN_0:?set CORS_ORIGIN_0}
+
+  # Queue. Concurrency is cheap: each slot is an async loop, ~10 KB.
+  Jobs__Concurrency: ${JOBS_CONCURRENCY:-4}
+  Jobs__MaxAttempts: ${JOBS_MAX_ATTEMPTS:-5}
+
+  # Schema gate: "check" refuses to serve on a pending migration; "apply"
+  # runs them. Never leave "apply" on in a long-running stack.
+  Migrations__Mode: ${MIGRATIONS_MODE:-check}
+
+  # Set this to the reverse proxy address so client IPs stay meaningful.
+  # WARNING: leave the key OUT entirely when unset - the app rejects an empty
+  # entry. To enable, add Security__TrustedProxies__0: "10.0.0.5" here.
+  # Security__TrustedProxies__0: ${TRUSTED_PROXY_0}
+
+services:
+  moeflow-csharp-api:
+    image: ${SHORELINE_IMAGE:?set SHORELINE_IMAGE to the C# backend image}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${CSHARP_API_PORT:-5091}:8080"
+    environment:
+      <<: *csharp_env
+      # The API instance owns the schema gate and never consumes the queue.
+      Migrations__Enabled: "true"
+      Jobs__WorkerEnabled: "false"
+      # Keep both scanners off here; the worker instance owns them.
+      Notifications__WorkerEnabled: "false"
+      StoragePool__WorkerEnabled: "false"
+    mem_limit: 512m
+    stop_grace_period: 40s
+    logging: *logging_options
+
+  moeflow-csharp-worker:
+    image: ${SHORELINE_IMAGE:?set SHORELINE_IMAGE to the C# backend image}
+    restart: unless-stopped
+    environment:
+      <<: *csharp_env
+      # Only the API instance runs migrations, so a rolling deploy never
+      # races for the migration lease.
+      Migrations__Enabled: "false"
+      Jobs__WorkerEnabled: "true"
+      # Both scanners SEND MAIL / MOVE OBJECTS against the live dataset.
+      # Off by default: turn them on deliberately, never by accident.
+      Notifications__WorkerEnabled: ${NOTIFICATIONS_WORKER_ENABLED:-false}
+      StoragePool__WorkerEnabled: ${STORAGE_POOL_WORKER_ENABLED:-false}
+    mem_limit: 512m
+    stop_grace_period: 40s
+    logging: *logging_options
+
+  moeflow-csharp-frontend:
+    image: ${NGINX_IMAGE:-nginx:alpine}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${CSHARP_HTTP_PORT:-5090}:80"
+    volumes:
+      # Dedicated template dir: the legacy templates/ dir also holds the Python
+      # stack's default.conf.template, which would collide on listen :80.
+      - ./nginx/templates-csharp:/etc/nginx/templates:ro
+      - ${FRONTEND_BUILD_DIR:-/mnt/c/Users/88888888/shoreline-moeflow/shoreline-moeflow-frontend/build}:/build:ro
+    environment:
+      # Consumed by nginx's envsubst entrypoint.
+      CSHARP_API_HOST: moeflow-csharp-api
+      CSHARP_API_PORT: "8080"
+      MAX_CONTENT_LENGTH_MB: ${MAX_CONTENT_LENGTH_MB:-1024}
+    depends_on:
+      - moeflow-csharp-api
+    logging: *logging_options
