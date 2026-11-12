@@ -4,10 +4,12 @@
 # existing external network and never creates a second database. That is what
 # lets you compare both backends against one dataset.
 #
-# Roles:
-#   moeflow-csharp-api      HTTP only, runs the schema gate (Migrations__Mode).
-#   moeflow-csharp-worker   drains the Mongo-backed job queue, no ports.
+# Roles (default: one backend container):
+#   moeflow-csharp-api      HTTP + job consumer + schema gate.
 #   moeflow-csharp-frontend nginx: serves the SPA build and proxies /api/.
+#
+# Optional, only with --profile split:
+#   moeflow-csharp-worker   a dedicated job consumer, no ports.
 #
 # Usage:
 #   cp .env-csharp.sample .env-csharp   # then fill the CHANGE_ME values
@@ -76,6 +78,12 @@ x-csharp-env: &csharp_env
   # Security__TrustedProxies__0: ${TRUSTED_PROXY_0}
 
 services:
+  # One process, one container: HTTP + job consumer + schema gate. That is the
+  # default and what this box needs.
+  #
+  # If you ever want to scale the consumer independently, set
+  # JOBS_WORKER_ENABLED=false and start the "split" profile. For a 2-core host
+  # the split only costs an extra ~63 MiB and buys nothing.
   moeflow-csharp-api:
     image: ${SHORELINE_IMAGE:?set SHORELINE_IMAGE to the C# backend image}
     restart: unless-stopped
@@ -83,27 +91,30 @@ services:
       - "127.0.0.1:${CSHARP_API_PORT:-5091}:8080"
     environment:
       <<: *csharp_env
-      # The API instance owns the schema gate and never consumes the queue.
+      # This single instance owns both the schema gate and the queue.
       Migrations__Enabled: "true"
-      Jobs__WorkerEnabled: "false"
-      # Keep both scanners off here; the worker instance owns them.
-      Notifications__WorkerEnabled: "false"
-      StoragePool__WorkerEnabled: "false"
+      Jobs__WorkerEnabled: ${JOBS_WORKER_ENABLED:-true}
+      # Both scanners SEND MAIL / MOVE OBJECTS against the live dataset.
+      # Off by default: turn them on deliberately, never by accident.
+      Notifications__WorkerEnabled: ${NOTIFICATIONS_WORKER_ENABLED:-false}
+      StoragePool__WorkerEnabled: ${STORAGE_POOL_WORKER_ENABLED:-false}
     mem_limit: 512m
     stop_grace_period: 40s
     logging: *logging_options
 
+  # Optional split: only starts with --profile split.
+  #   JOBS_WORKER_ENABLED=false docker compose --profile split up -d
+  # The main service must then stop consuming, hence the variable above.
   moeflow-csharp-worker:
+    profiles: ["split"]
     image: ${SHORELINE_IMAGE:?set SHORELINE_IMAGE to the C# backend image}
     restart: unless-stopped
     environment:
       <<: *csharp_env
-      # Only the API instance runs migrations, so a rolling deploy never
+      # Only the HTTP instance runs migrations, so a rolling deploy never
       # races for the migration lease.
       Migrations__Enabled: "false"
       Jobs__WorkerEnabled: "true"
-      # Both scanners SEND MAIL / MOVE OBJECTS against the live dataset.
-      # Off by default: turn them on deliberately, never by accident.
       Notifications__WorkerEnabled: ${NOTIFICATIONS_WORKER_ENABLED:-false}
       StoragePool__WorkerEnabled: ${STORAGE_POOL_WORKER_ENABLED:-false}
     mem_limit: 512m

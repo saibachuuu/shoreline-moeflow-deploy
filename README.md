@@ -74,11 +74,18 @@ body {
 
 | 服务 | 作用 | 端口 |
 |---|---|---|
-| `moeflow-csharp-api` | HTTP，独占迁移闸门（`Migrations__Mode`） | `127.0.0.1:5091` → 8080 |
-| `moeflow-csharp-worker` | 消费 MongoDB 任务队列，不发布端口 | — |
+| `moeflow-csharp-api` | HTTP + 任务消费 + 迁移闸门（单容器） | `127.0.0.1:5091` → 8080 |
 | `moeflow-csharp-frontend` | nginx，托管 SPA 并反代 `/api/` | `127.0.0.1:5090` → 80 |
 
-与 Python 群组相比少了 RabbitMQ 和三个 Celery 容器：任务队列落在 MongoDB 的 `csharp_job` 集合里，由 `worker` 单进程消费。
+默认只有一个后端容器：HTTP 和任务队列在同一个进程里。与 Python 群组相比少了 RabbitMQ 和三个 Celery 容器——任务队列落在 MongoDB 的 `csharp_job` 集合里。
+
+确实需要把消费者拆出来单独扩缩时，才启用可选的 split profile：
+
+```bash
+JOBS_WORKER_ENABLED=false docker compose -f docker-compose.csharp.yml --env-file .env-csharp --profile split up -d
+```
+
+2 核机器上不建议拆：多一个容器只多约 63 MiB，换不到任何吞吐。
 
 ### 部署
 
