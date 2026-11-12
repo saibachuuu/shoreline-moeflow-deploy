@@ -1,0 +1,10 @@
+# Keep every text file LF, even on Windows checkouts.
+#
+# The C# stack is started from WSL against this path. A CR left at the end of
+# a value in .env-csharp silently corrupts credentials, and a CR in an nginx
+# template does the same to the rendered config.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.gz binary
